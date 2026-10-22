@@ -102,6 +102,28 @@ export function progressLine(pos: number, dur: number, cols: number): string {
   return `${progressBar(pos, dur, barCols)} ${time}`
 }
 
+// Show a line a moment before its timestamp, as the singer draws breath: it
+// also covers the up-to-half-second lag between polls.
+const LYRIC_LEAD_SEC = 0.3
+
+/**
+ * The lyric lines around pos (seconds): the line being sung, the one before and
+ * the one after. Before the first line, current is an ellipsis and next the
+ * first line; an empty current (an instrumental gap) stays empty.
+ */
+export function lyricWindow(
+  lines: readonly { start_sec: number; text: string }[],
+  pos: number,
+): { previous: string; current: string; next: string } {
+  let i = -1
+  for (let k = 0; k < lines.length; k++) {
+    if (lines[k].start_sec <= pos + LYRIC_LEAD_SEC) i = k
+    else break
+  }
+  if (i < 0) return { previous: '', current: '...', next: lines[0]?.text ?? '' }
+  return { previous: lines[i - 1]?.text ?? '', current: lines[i].text, next: lines[i + 1]?.text ?? '' }
+}
+
 /** The one-line status pinned under the prompt. */
 export function statusText(np: { state: string; track: { id: string; name: string; artist: string; duration_sec: number }; position_sec: number }): string | undefined {
   if (np.state === 'stopped' || !np.track.id) return undefined

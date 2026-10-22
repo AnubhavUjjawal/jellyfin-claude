@@ -81,6 +81,11 @@ func (a *app) registerTools(s *mcp.Server) {
 		Description: "Cover art of an item (usually the current track's album_id) as a PNG image. Used by the player pane.",
 	}, a.artwork)
 	mcp.AddTool(s, &mcp.Tool{
+		Name:        "lyrics",
+		Annotations: readOnly,
+		Description: "A track's lyrics (default: the current track), each line with its start time when the lyrics are synced.",
+	}, a.lyrics)
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "logout",
 		Annotations: acts,
 		Description: "Stop playback, log out of the Jellyfin server and forget the saved login.",
@@ -466,7 +471,7 @@ func (a *app) play(ctx context.Context, _ *mcp.CallToolRequest, in playArgs) (*m
 
 	tracks := make([]player.Track, len(items))
 	for i, it := range items {
-		tracks[i] = player.Track{ID: it.ID, Name: it.Name, Artist: it.Artist(), Album: it.Album, AlbumID: it.AlbumID, Container: it.Container, Duration: it.DurationSec()}
+		tracks[i] = player.Track{ID: it.ID, Name: it.Name, Artist: it.Artist(), Album: it.Album, AlbumID: it.AlbumID, HasLyrics: it.HasLyrics, Container: it.Container, Duration: it.DurationSec()}
 	}
 	if in.Shuffle {
 		rand.Shuffle(len(tracks), func(i, j int) { tracks[i], tracks[j] = tracks[j], tracks[i] })
@@ -617,12 +622,13 @@ func bestMatch(ctx context.Context, c *jellyfin.Client, query string) (*jellyfin
 // --- player pane ---
 
 type npTrack struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Artist   string  `json:"artist"`
-	Album    string  `json:"album"`
-	AlbumID  string  `json:"album_id"`
-	Duration float64 `json:"duration_sec"`
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Artist    string  `json:"artist"`
+	Album     string  `json:"album"`
+	AlbumID   string  `json:"album_id"`
+	Duration  float64 `json:"duration_sec"`
+	HasLyrics bool    `json:"has_lyrics"`
 }
 
 // nowPlayingOut is the pane's view of the world. Every field is always present
@@ -646,7 +652,7 @@ type nowPlayingOut struct {
 }
 
 func toNP(t player.Track) npTrack {
-	return npTrack{ID: t.ID, Name: t.Name, Artist: t.Artist, Album: t.Album, AlbumID: t.AlbumID, Duration: t.Duration}
+	return npTrack{ID: t.ID, Name: t.Name, Artist: t.Artist, Album: t.Album, AlbumID: t.AlbumID, Duration: t.Duration, HasLyrics: t.HasLyrics}
 }
 
 func (a *app) nowPlaying(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, nowPlayingOut, error) {
@@ -705,6 +711,53 @@ func (a *app) artwork(ctx context.Context, _ *mcp.CallToolRequest, in artworkArg
 		return nil, nil, err
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.ImageContent{Data: png, MIMEType: "image/png"}}}, nil, nil
+}
+
+type lyricsArgs struct {
+	ItemID string `json:"item_id,omitempty" jsonschema:"the track; defaults to the one playing"`
+}
+
+type lyricLine struct {
+	Start float64 `json:"start_sec" jsonschema:"seconds into the track, or -1 when the lyrics are not synced"`
+	Text  string  `json:"text"`
+}
+
+type lyricsOut struct {
+	TrackID string      `json:"track_id"`
+	Synced  bool        `json:"synced"`
+	Lines   []lyricLine `json:"lines" jsonschema:"empty when the track has no lyrics"`
+}
+
+func (a *app) lyrics(ctx context.Context, _ *mcp.CallToolRequest, in lyricsArgs) (*mcp.CallToolResult, lyricsOut, error) {
+	c, err := a.conn(ctx)
+	if err != nil {
+		return nil, lyricsOut{}, err
+	}
+	id := in.ItemID
+	if id == "" {
+		s := a.player.Status(0)
+		if s.Current == nil {
+			return nil, lyricsOut{}, errors.New("nothing is playing; pass item_id")
+		}
+		id = s.Current.ID
+	}
+	out := lyricsOut{TrackID: id, Lines: []lyricLine{}}
+	lines, err := c.Lyrics(ctx, id)
+	if jellyfin.IsStatus(err, 404) {
+		return nil, out, nil
+	}
+	if err != nil {
+		return nil, lyricsOut{}, err
+	}
+	out.Synced = len(lines) > 0
+	for _, l := range lines {
+		start := l.StartSec()
+		if start < 0 {
+			out.Synced = false
+		}
+		out.Lines = append(out.Lines, lyricLine{Start: start, Text: l.Text})
+	}
+	return nil, out, nil
 }
 
 // --- formatting ---

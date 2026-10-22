@@ -5,8 +5,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, McpToolResult, Register } from 'claude-code'
 
-import type { JellyfinNowPlaying } from '../types'
-import { fit, progressLine, statusText, timeLabel } from './layout'
+import type { JellyfinLyrics, JellyfinNowPlaying } from '../types'
+import { fit, lyricWindow, progressLine, statusText, timeLabel } from './layout'
 
 type Engine = EngineInterface
 
@@ -17,17 +17,23 @@ const ART_COLS = 14
 const ART_ROWS = 7
 // Below this many columns the cover is left out so the text keeps its room.
 const ART_MIN_WIDTH = 44
-const IDLE_POLL_EVERY = 5
+// The clock ticks every TICK_MS; the player is polled every so many ticks.
+const TICK_MS = 250
+const POLL_TICKS_LYRICS = 2 // every 500 ms while synced lyrics are on screen
+const POLL_TICKS_PLAYING = 4 // every second while music plays
+const POLL_TICKS_IDLE = 20 // every 5 s otherwise
+const PERMISSION_TICKS = 40 // every 10 s while the permission rule is missing
 // How the engine names this plugin's MCP server and its tools.
 const SETUP_RULE = 'mcp__plugin_jellyfin_jellyfin'
 const OWN_TOOLS = `${SETUP_RULE}__`
-const PERMISSION_RECHECK_EVERY = 10
 const SETUP_HINT = `The player pane needs a permission rule to update in the background: run /permissions and add an allow rule for ${SETUP_RULE}`
 
 const np = atom({ plugin: 'jellyfin', key: 'np' } as const, null)
 const art = atom({ plugin: 'jellyfin', key: 'art' } as const, null)
 const hasAutoOpened = atom({ plugin: 'jellyfin', key: 'hasAutoOpened' } as const, false)
 const needsSetup = atom({ plugin: 'jellyfin', key: 'needsSetup' } as const, false)
+const lyrics = atom({ plugin: 'jellyfin', key: 'lyrics' } as const, null)
+const showLyrics = atom({ plugin: 'jellyfin', key: 'showLyrics' } as const, true)
 
 const HELP = [
   '/jf                 show or hide the player pane',
@@ -35,6 +41,7 @@ const HELP = [
   '/jf pause | resume | next | prev | stop',
   '/jf vol 40 | vol +10 | seek 1:30 | seek +30',
   '/jf mix             more like the current track',
+  '/jf lyrics          print the lyrics; /jf lyrics on|off shows or hides them in the pane',
   '/jf fav | shuffle | clear | repeat off|all|one | status',
 ].join('\n')
 
@@ -90,13 +97,13 @@ function nowLine(s: JellyfinNowPlaying | null): string {
 const live: {
   server?: string
   isPolling: boolean
-  idleTicks: number
+  ticks: number
   lastTrackId?: string
   artKey?: string
+  lyricsKey?: string
   canShowArt: boolean
   isAllowed: boolean
-  permissionTicks: number
-} = { isPolling: false, idleTicks: 0, canShowArt: false, isAllowed: false, permissionTicks: 0 }
+} = { isPolling: false, ticks: 0, canShowArt: false, isAllowed: false }
 
 /**
  * Whether this terminal draws pictures: kitty, Ghostty, WezTerm and iTerm2 do
@@ -147,6 +154,26 @@ async function loadArt($: Engine, key: string): Promise<void> {
   if (live.artKey === key) await update($, art, () => ({ key, png }))
 }
 
+/** The lyrics tool's JSON (Claude Code passes it as text), or null. */
+function lyricsOf(res: McpToolResult): JellyfinLyrics | null {
+  try {
+    const parsed: unknown = JSON.parse(textOf(res))
+    return parsed && typeof parsed === 'object' && 'lines' in parsed ? (parsed as JellyfinLyrics) : null
+  } catch {
+    return null
+  }
+}
+
+async function loadLyrics($: Engine, trackId: string): Promise<void> {
+  let ly: JellyfinLyrics = { track_id: trackId, synced: false, lines: [] }
+  try {
+    ly = lyricsOf(await call($, 'lyrics', { item_id: trackId })) ?? ly
+  } catch {
+    // No lyrics: the pane leaves the section out.
+  }
+  if (live.lyricsKey === trackId) await update($, lyrics, () => ly)
+}
+
 async function refresh($: Engine): Promise<JellyfinNowPlaying | null> {
   const s = nowPlayingOf(await call($, 'now_playing'))
   if (!s) throw new Error('now_playing returned no player state')
@@ -171,6 +198,14 @@ async function refresh($: Engine): Promise<JellyfinNowPlaying | null> {
     live.artKey = key
     void loadArt($, key).catch(() => {}) // a reload may have unloaded the state
   }
+  if (id && id !== live.lyricsKey) {
+    live.lyricsKey = id
+    if (s.track.has_lyrics) {
+      void loadLyrics($, id).catch(() => {})
+    } else {
+      await update($, lyrics, () => ({ track_id: id, synced: false, lines: [] }))
+    }
+  }
   return s
 }
 
@@ -189,18 +224,24 @@ async function isAllowed($: Engine): Promise<boolean> {
 }
 
 async function tick($: Engine): Promise<void> {
+  const n = live.ticks++
   if (live.isPolling) return
   if (!live.isAllowed) {
     // Without the rule every poll would raise a permission prompt (or be
     // refused in auto mode), so wait for it, looking again now and then.
-    if (live.permissionTicks++ % PERMISSION_RECHECK_EVERY !== 0) return
+    if (n % PERMISSION_TICKS !== 0) return
     live.isAllowed = await isAllowed($)
     await update($, needsSetup, () => !live.isAllowed)
     if (!live.isAllowed) return
   }
   const s = await read($, np)
-  // Poll every second while music plays, every few seconds otherwise.
-  if ((!s || s.state !== 'playing') && live.idleTicks++ % IDLE_POLL_EVERY !== 0) return
+  let every = POLL_TICKS_IDLE
+  if (s?.state === 'playing') {
+    const ly = await read($, lyrics)
+    const isFollowing = ly?.synced && ly.track_id === s.track.id && (await read($, showLyrics))
+    every = isFollowing ? POLL_TICKS_LYRICS : POLL_TICKS_PLAYING
+  }
+  if (n % every !== 0) return
   live.isPolling = true
   try {
     await refresh($)
@@ -219,6 +260,27 @@ async function act($: Engine, tool: string, args: Record<string, unknown>): Prom
   const note = tool === 'control' ? textOf(res).split('\n')[0] : ''
   const line = nowLine(s)
   return note && !note.startsWith('Player:') ? `${note}\n${line}` : line
+}
+
+/** The lyrics Button's press: show or hide the lyrics section. */
+function toggleLyrics($: Engine): () => void {
+  return () => {
+    void update($, showLyrics, on => !on).catch(() => {})
+  }
+}
+
+/** /jf lyrics: the current track's lyrics in full, for the transcript. */
+async function printLyrics($: Engine) {
+  try {
+    const s = await read($, np)
+    if (!s?.track.id) return { text: 'Nothing is playing.' }
+    const ly = lyricsOf(await call($, 'lyrics', { item_id: s.track.id }))
+    if (!ly || ly.lines.length === 0) return { text: `No lyrics for ${s.track.name}.` }
+    const who = s.track.artist ? `${s.track.name} - ${s.track.artist}` : s.track.name
+    return { text: [`Lyrics: ${who}`, '', ...ly.lines.map(l => l.text)].join('\n') }
+  } catch (err) {
+    return { text: errorText(err) }
+  }
 }
 
 /** A Button's press: act, and surface a failure as a toast. */
@@ -261,7 +323,7 @@ export const register: Register = on => {
       immediate: true,
     })
     live.canShowArt = await detectArt($).catch(() => false)
-    $.clock.every(1000, () => void tick($))
+    $.clock.every(TICK_MS, () => void tick($))
     return next(e)
   })
 
@@ -270,7 +332,8 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     const tool = String(e.tool)
-    if (tool.startsWith(OWN_TOOLS) && !tool.endsWith('__now_playing') && !tool.endsWith('__artwork')) {
+    const isRead = ['__now_playing', '__artwork', '__lyrics'].some(suffix => tool.endsWith(suffix))
+    if (tool.startsWith(OWN_TOOLS) && !isRead) {
       void refresh($).catch(() => null)
     }
     return ran
@@ -338,6 +401,12 @@ export const register: Register = on => {
       case 'fav':
       case 'favorite':
         return run($, 'favorite', {})
+      case 'lyrics':
+        if (value === 'on' || value === 'off') {
+          await update($, showLyrics, () => value === 'on')
+          return { text: `Lyrics in the pane: ${value}.` }
+        }
+        return printLyrics($)
       case 'mix': {
         const s = await read($, np)
         if (!s?.track.id) return { text: 'Nothing is playing to make a mix from.' }
@@ -415,6 +484,28 @@ export const register: Register = on => {
     const byline = [t.artist, t.album].filter(Boolean).join(' - ')
     const nextRepeat = s.repeat === 'off' ? 'all' : s.repeat === 'all' ? 'one' : 'off'
 
+    // Lyrics: three rows (last line, current line, next line) cut to the width,
+    // so the pane keeps one height as they move and nothing wraps past a frame.
+    const isLyricsOn = await read($, showLyrics)
+    const ly = await read($, lyrics)
+    let lyricsView = null
+    if (isLyricsOn && t.has_lyrics) {
+      if (!ly || ly.track_id !== t.id) {
+        lyricsView = <Text dimColor>{fit('Loading lyrics...', width)}</Text>
+      } else if (ly.lines.length > 0 && !ly.synced) {
+        lyricsView = <Text dimColor>{fit('These lyrics are not synced: /jf lyrics prints them.', width)}</Text>
+      } else if (ly.lines.length > 0) {
+        const w = lyricWindow(ly.lines, s.position_sec)
+        lyricsView = (
+          <Box flexDirection="column" width={width}>
+            <Text dimColor wrap="truncate-end">{fit(w.previous, width) || ' '}</Text>
+            <Text bold wrap="truncate-end">{fit(w.current, width) || ' '}</Text>
+            <Text dimColor wrap="truncate-end">{fit(w.next, width) || ' '}</Text>
+          </Box>
+        )
+      }
+    }
+
     return (
       <Box flexDirection="column" gap={1} width={width} overflow="hidden">
         <Box flexDirection="row" gap={2}>
@@ -426,6 +517,8 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate-end">{fit(details, textCols)}</Text>
           </Box>
         </Box>
+
+        {lyricsView}
 
         <Box flexDirection="row" flexWrap="wrap" columnGap={1} width={width}>
           <Button key="prev" label="prev" hotkey="b" onPress={press($, 'control', { action: 'previous' })} />
@@ -444,6 +537,9 @@ export const register: Register = on => {
           <Button key="mix" label="mix" hotkey="m" onPress={press($, 'play', { item_ids: [t.id], instant_mix: true })} />
           <Button key="fav" label="fav" hotkey="f" onPress={press($, 'favorite', {})} />
           <Button key="repeat" label={`repeat ${s.repeat}`} hotkey="r" onPress={press($, 'control', { action: 'repeat', value: nextRepeat })} />
+          {t.has_lyrics && (
+            <Button key="lyrics" label={isLyricsOn ? 'hide lyrics' : 'lyrics'} hotkey="l" onPress={toggleLyrics($)} />
+          )}
         </Box>
 
         {s.upcoming.length > 0 && (

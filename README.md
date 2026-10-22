@@ -72,6 +72,7 @@ Merge the printed snippet into `~/Library/Application Support/Claude/claude_desk
 
 - **The pane** opens by itself when music starts on a wide terminal (docked beside the chat), or with `/jf` at any width (above the prompt). Buttons work with the mouse, or with Tab and Enter once the pane has focus. Pressing an up-next row jumps to it.
 - **Album art** shows in terminals that draw pictures (kitty, Ghostty, WezTerm, iTerm2 3.5+, not inside tmux); elsewhere the text gets the room.
+- **Lyrics** stream in the pane, line by line, for tracks with synced lyrics (from `.lrc` files beside your music or a lyrics plugin such as LrcLib; Jellyfin 10.9+): the line being sung in bold between the one before and the one after. The pane polls twice a second while they show. `hide lyrics` (or `/jf lyrics off`) turns them off; `/jf lyrics` prints the whole text, which also works for unsynced lyrics.
 - **The status line** under the prompt shows the current track; a toast announces each new one.
 - **`/jf` commands** act instantly, without a model turn:
 
@@ -83,6 +84,7 @@ Merge the printed snippet into `~/Library/Application Support/Claude/claude_desk
 | `/jf vol 40` / `vol +10` | volume |
 | `/jf seek 1:30` / `seek +30` | seek (mpv) |
 | `/jf mix` | more like the current track |
+| `/jf lyrics` / `lyrics on` / `lyrics off` | print the lyrics / show or hide them in the pane |
 | `/jf fav`, `shuffle`, `clear`, `repeat all` | the rest |
 
 Everything is laid out against the pane's measured width and only single-width characters are drawn, so the frame stays intact at any terminal size; long or wide (CJK, emoji) titles are cut with `…`.
@@ -101,6 +103,7 @@ Everything is laid out against the pane's measured width and only single-width c
 | `favorite` | Favorite or unfavorite the current track or any item |
 | `now_playing` | Playback state as structured data (used by the pane) |
 | `artwork` | An item's cover as a PNG (used by the pane) |
+| `lyrics` | A track's lyrics, with each line's start time when synced |
 | `logout` | Log out and forget the saved login |
 
 ## Configuration (environment variables, all optional)

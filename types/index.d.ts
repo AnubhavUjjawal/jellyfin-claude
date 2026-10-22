@@ -8,7 +8,14 @@ export type JellyfinTrack = {
   album: string
   album_id: string
   duration_sec: number
+  has_lyrics: boolean
 }
+
+/** One lyric line; start_sec is -1 when the lyrics are not synced. */
+export type JellyfinLyricLine = { start_sec: number; text: string }
+
+/** What the lyrics tool returns: lines is empty when the track has none. */
+export type JellyfinLyrics = { track_id: string; synced: boolean; lines: JellyfinLyricLine[] }
 
 export type JellyfinNowPlaying = {
   connected: boolean
@@ -38,6 +45,8 @@ declare module 'claude-code' {
       art: JellyfinArt | null
       hasAutoOpened: boolean
       needsSetup: boolean
+      lyrics: JellyfinLyrics | null
+      showLyrics: boolean
     }
   }
 }
