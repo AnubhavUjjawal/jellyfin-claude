@@ -35,12 +35,20 @@ func main() {
 		fmt.Println(jellyfin.Version)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == daemonFlag {
+		log.SetPrefix("jellyfin player: ")
+		if err := runPlayerDaemon(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
 	a := newApp(cfg)
+	a.player = a.newPlayer()
 	defer a.close()
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "jellyfin", Title: "Jellyfin music", Version: jellyfin.Version},
@@ -62,7 +70,7 @@ type app struct {
 	device  string
 
 	playerOpts player.Options
-	player     *player.Player
+	player     playerAPI
 }
 
 // pendingLogin is a Quick Connect request waiting for the user's approval.
@@ -73,6 +81,7 @@ type pendingLogin struct {
 	cancel context.CancelFunc
 }
 
+// newApp sets up the login and player options; the caller picks the player.
 func newApp(cfg *config.Config) *app {
 	a := &app{cfg: cfg, device: deviceName()}
 
@@ -92,18 +101,22 @@ func newApp(cfg *config.Config) *app {
 		a.client.Token, a.client.UserID = cfg.AccessToken, cfg.UserID
 	}
 
-	volume := 100
-	if v, err := parseInt(os.Getenv("JELLYFIN_VOLUME")); err == nil {
-		volume = v
-	}
 	a.playerOpts = player.Options{
 		Backend:   os.Getenv("JELLYFIN_PLAYER"),
 		MPVPath:   os.Getenv("MPV_PATH"),
 		StreamURL: a.streamURL,
 		Fetch:     a.fetchForAfplay,
 	}
-	a.player = player.New(player.NewFactory(a.playerOpts), &reporter{a: a}, volume)
 	return a
+}
+
+// localPlayer is a player in this process, playing with this app's login.
+func (a *app) localPlayer() *player.Player {
+	volume := 100
+	if v, err := parseInt(os.Getenv("JELLYFIN_VOLUME")); err == nil {
+		volume = v
+	}
+	return player.New(player.NewFactory(a.playerOpts), &reporter{a: a}, volume)
 }
 
 func (a *app) close() {

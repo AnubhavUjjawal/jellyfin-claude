@@ -10,14 +10,15 @@ Talk to Claude, hear your music. This Claude Code plugin (and MCP server for Cla
 ## How it works
 
 ```
-Claude ──MCP──▶ jellyfin-mcp ──HTTP──▶ Jellyfin server (search, stream, play reporting)
+Claude ──MCP──▶ jellyfin-mcp ──HTTP──▶ Jellyfin server (search, browse, artwork, lyrics)
                      │
-                     └──▶ mpv (streams, seeks, live volume)  or  afplay (macOS fallback)
+                     └──socket──▶ player daemon ──▶ mpv (streams, seeks, live volume)  or  afplay (macOS fallback)
 ```
 
 - **Discovery**: Jellyfin's UDP broadcast on port 7359, so Claude can find servers without you typing an address.
 - **Login**: Quick Connect by default. You approve a 6-digit code in any signed-in Jellyfin app, so your password never goes through the chat. The token is saved in `~/.config/jellyfin-claude/config.json` (mode 0600).
 - **Playback**: a headless `mpv` streams the original file. If mpv isn't installed, macOS's built-in `afplay` is used instead (it downloads each track first and can't seek or change volume mid-track).
+- **One player per machine**: the first server that needs the player starts it as a small background process (`jellyfin-mcp --player-daemon`), and every server drives that one over a socket in the config dir. So when Claude Code moves a session to a new process (say, after a trip to the sessions page), or two sessions both use the plugin, they all see and control the same music instead of starting a second, silent queue. The player quits 15 seconds after the last session using it goes away; its log is `player.log` beside the config.
 - **Reporting**: plays are reported back to Jellyfin, so play counts, "recently played" and the dashboard stay accurate.
 
 ## Requirements
@@ -131,13 +132,15 @@ Everything is laid out against the pane's measured width and only single-width c
 | `MPV_PATH` | Path to mpv if it isn't on PATH or in a Homebrew location |
 | `JELLYFIN_VOLUME` | Starting volume, 0-100 (default 100) |
 | `JELLYFIN_URL` + `JELLYFIN_API_KEY` | Use an API key instead of logging in (`JELLYFIN_USERNAME` or `JELLYFIN_USER_ID` picks the user; default is the first admin) |
-| `JELLYFIN_CLAUDE_CONFIG_DIR` | Where to keep the saved login |
+| `JELLYFIN_CLAUDE_CONFIG_DIR` | Where to keep the saved login (each config dir gets its own player) |
+| `JELLYFIN_SHARED_PLAYER` | `0` gives each server a player of its own instead of the shared one |
 
 ## Troubleshooting
 
 - **No servers found**: auto-discovery may be off (Jellyfin Dashboard > Networking > "Enable auto discovery"), the server may be on another subnet or VPN, or macOS may be blocking local network access. Check System Settings > Privacy & Security > Local Network and allow your terminal app (or Claude). You can always give Claude the address directly.
 - **Quick Connect is disabled**: an admin can enable it in Dashboard > General, or connect with a username and password.
-- **Music stops when I close Claude**: by design. The player lives inside the MCP server, which exits with the session.
+- **Music stops when I close Claude**: by design, once no Claude session using the plugin is left (after 15 seconds). `/jf stop` stops it sooner.
+- **The pane says "Nothing playing" while music plays**: a server from before the shared player is still holding the music. Restart Claude Code (or quit the old session) so every server uses the shared player.
 
 ## Development
 

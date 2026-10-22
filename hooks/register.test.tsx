@@ -47,7 +47,7 @@ function playing(over: Partial<JellyfinNowPlaying> = {}): JellyfinNowPlaying {
 type Call = { tool: string; args: Record<string, unknown> }
 
 /** Stands in for the engine: the jellyfin MCP server, panes, status and toasts. */
-function fakeEngine(on: On, state: { np: JellyfinNowPlaying }, permission: 'allow' | 'ask' = 'allow') {
+function fakeEngine(on: On, state: { np: JellyfinNowPlaying; lyricsFailures?: number }, permission: 'allow' | 'ask' = 'allow') {
   const calls: Call[] = []
   const statuses: (string | undefined)[] = []
   const toasts: string[] = []
@@ -68,6 +68,10 @@ function fakeEngine(on: On, state: { np: JellyfinNowPlaying }, permission: 'allo
           },
         }
       case 'lyrics':
+        if (state.lyricsFailures) {
+          state.lyricsFailures--
+          return { value: { content: [{ type: 'text', text: 'jellyfin: request timed out' }], isError: true } }
+        }
         return {
           value: {
             content: [{ type: 'text', text: JSON.stringify({ track_id: e.args.item_id, synced: true, lines: LYRICS }) }],
@@ -272,6 +276,63 @@ test('synced lyrics stream in the pane, faster polling while they show', async (
   const printed = await $.command.run({ command: 'jf', args: 'lyrics' })
   expect(printed.text).toContain('Lyrics: Clocks - Coldplay')
   expect(printed.text).toContain('Come out of things unsaid')
+})
+
+test('a failed lyrics fetch is tried again, then given up on', async ($, on) => {
+  const clock = mock.clock(on)
+  const state = { np: playing({ position_sec: 95 }), lyricsFailures: 1 }
+  const { calls } = fakeEngine(on, state)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  await clock.settle()
+
+  let ui = await $.ui.mount(pane('terminal', 40))
+  expect((await ui.find({ type: 'Text', text: /^Tides/ }))?.props.bold).toBe(true)
+  await ui.unmount()
+
+  // Failing every time, a track's lyrics are asked for a few times, not forever.
+  state.lyricsFailures = 100
+  state.np = playing({ track: track('t2', 'My Universe'), position_sec: 95 })
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(calls.filter(c => c.tool === 'lyrics' && c.args.item_id === 't2')).toHaveLength(3)
+  ui = await $.ui.mount(pane('terminal', 40))
+  expect(await ui.find({ type: 'Text', text: /Loading lyrics/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a resumed session with empty state loads the cover and lyrics again', async ($, on) => {
+  // The session's $.state, held here so it can be swapped for an empty one as a
+  // resume or a switch from the sessions page does, the module staying loaded.
+  let store = new Map<string, { value: unknown; version: number }>()
+  const name = (e: { plugin: string; key: string; id?: string }) => `${e.plugin}/${e.key}/${e.id ?? ''}`
+  on('state.get', (_, e) => ({ value: store.get(name(e)) ?? { value: undefined, version: 0 } }))
+  on('state.set', (_, e) => {
+    const version = store.get(name(e))?.version ?? 0
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    store.set(name(e), { value: e.value, version: version + 1 })
+    return { value: { isSet: true, version: version + 1 } }
+  })
+  const clock = mock.clock(on)
+  const { calls } = fakeEngine(on, { np: playing({ position_sec: 95 }) })
+  mock.env(on, { TERM_PROGRAM: 'ghostty' })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  await clock.settle()
+
+  let ui = await $.ui.mount(pane('terminal', 60))
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  await ui.unmount()
+
+  store = new Map()
+  await clock.advance(6000) // nothing is playing as far as the empty state knows: a 5 s poll
+  await clock.settle()
+  expect(calls.filter(c => c.tool === 'artwork')).toHaveLength(2)
+
+  ui = await $.ui.mount(pane('terminal', 60))
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^Tides/ }))?.props.bold).toBe(true)
+  await ui.unmount()
 })
 
 test('without the permission rule it does not poll and says how to set it up', async ($, on) => {

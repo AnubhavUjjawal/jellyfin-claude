@@ -43,4 +43,4 @@ In Claude Code the plugin also shows a now-playing pane, a status line and `/jf`
 
 ## Style
 
-Keep replies to a line or two: what's playing now and anything notable ("Playing OK Computer by Radiohead, 12 tracks"). Never show item ids to the user. Music stops when this Claude session ends.
+Keep replies to a line or two: what's playing now and anything notable ("Playing OK Computer by Radiohead, 12 tracks"). Never show item ids to the user. Music stops shortly after the last Claude session using the player ends.

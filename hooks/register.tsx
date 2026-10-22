@@ -23,6 +23,8 @@ const POLL_TICKS_LYRICS = 2 // every 500 ms while synced lyrics are on screen
 const POLL_TICKS_PLAYING = 4 // every second while music plays
 const POLL_TICKS_IDLE = 20 // every 5 s otherwise
 const PERMISSION_TICKS = 40 // every 10 s while the permission rule is missing
+// A lyrics fetch that fails (Jellyfin slow or away) is tried this many times.
+const LYRICS_TRIES = 3
 // How the engine names this plugin's MCP server and its tools.
 const SETUP_RULE = 'mcp__plugin_jellyfin_jellyfin'
 const OWN_TOOLS = `${SETUP_RULE}__`
@@ -93,17 +95,29 @@ function nowLine(s: JellyfinNowPlaying | null): string {
   return `${state}: ${who} (${timeLabel(s.position_sec, s.track.duration_sec)})`
 }
 
-// Per-load bookkeeping: reset on a reload. What the drawing reads is in $.state.
+// Per-load bookkeeping: reset on a reload. What the drawing reads is in $.state,
+// which a resumed or switched session starts empty while these stay, so what is
+// already loaded is told from $.state; here are only the fetches in flight.
 const live: {
   server?: string
   isPolling: boolean
   ticks: number
   lastTrackId?: string
-  artKey?: string
+  artLoading?: string
   lyricsKey?: string
+  lyricsLoading?: string
+  lyricsTries: number
+  isLyricsRetryDue: boolean
   canShowArt: boolean
   isAllowed: boolean
-} = { isPolling: false, ticks: 0, canShowArt: false, isAllowed: false }
+} = {
+  isPolling: false,
+  ticks: 0,
+  lyricsTries: 0,
+  isLyricsRetryDue: false,
+  canShowArt: false,
+  isAllowed: false,
+}
 
 /**
  * Whether this terminal draws pictures: kitty, Ghostty, WezTerm and iTerm2 do
@@ -151,7 +165,12 @@ async function loadArt($: Engine, key: string): Promise<void> {
   } catch {
     // No cover: the pane draws without one.
   }
-  if (live.artKey === key) await update($, art, () => ({ key, png }))
+  if (live.artLoading !== key) return // the track moved on to another cover
+  try {
+    await update($, art, () => ({ key, png }))
+  } finally {
+    live.artLoading = undefined
+  }
 }
 
 /** The lyrics tool's JSON (Claude Code passes it as text), or null. */
@@ -169,7 +188,12 @@ async function loadLyrics($: Engine, trackId: string): Promise<void> {
   try {
     ly = lyricsOf(await call($, 'lyrics', { item_id: trackId })) ?? ly
   } catch {
-    // No lyrics: the pane leaves the section out.
+    // A track without lyrics answers with no lines, so this is a failed fetch:
+    // try again at the next poll rather than settle on none for the track.
+    if (live.lyricsKey === trackId && ++live.lyricsTries < LYRICS_TRIES) {
+      live.isLyricsRetryDue = true
+      return
+    }
   }
   if (live.lyricsKey === trackId) await update($, lyrics, () => ly)
 }
@@ -194,14 +218,22 @@ async function refresh($: Engine): Promise<JellyfinNowPlaying | null> {
   }
 
   const key = s.track.album_id || s.track.id
-  if (key && key !== live.artKey) {
-    live.artKey = key
+  if (key && key !== live.artLoading && (await read($, art))?.key !== key) {
+    live.artLoading = key
     void loadArt($, key).catch(() => {}) // a reload may have unloaded the state
   }
-  if (id && id !== live.lyricsKey) {
+  const isLyricsMissing = id !== live.lyricsLoading && (await read($, lyrics))?.track_id !== id
+  if (id && (id !== live.lyricsKey || live.isLyricsRetryDue || isLyricsMissing)) {
+    if (id !== live.lyricsKey) live.lyricsTries = 0
     live.lyricsKey = id
+    live.isLyricsRetryDue = false
     if (s.track.has_lyrics) {
-      void loadLyrics($, id).catch(() => {})
+      live.lyricsLoading = id
+      void loadLyrics($, id)
+        .catch(() => {})
+        .finally(() => {
+          if (live.lyricsLoading === id) live.lyricsLoading = undefined
+        })
     } else {
       await update($, lyrics, () => ({ track_id: id, synced: false, lines: [] }))
     }
