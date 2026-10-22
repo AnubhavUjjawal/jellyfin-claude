@@ -33,6 +33,14 @@ Use `control`: pause, resume, toggle, next, previous, stop, seek (`value` second
 
 If `status` shows the afplay player, seeking isn't possible and volume changes apply from the next track; suggest `brew install mpv` if the user wants those.
 
+## Lyrics
+
+`lyrics` returns the current track's lyrics (or any track's, by `item_id`). Use it when the user asks what a song says or means, or wants a line quoted; quote only a few lines rather than the whole song. In Claude Code the pane already streams synced lyrics as the song plays.
+
+## The player pane and /jf
+
+In Claude Code the plugin also shows a now-playing pane, a status line and `/jf` commands the user can run without you (`/jf next`, `/jf vol 40`, `/jf radiohead`). When the user just wants a quick transport action, you may mention `/jf` as the instant way. If the pane says it needs setup, tell the user to add the permission rule `mcp__plugin_jellyfin_jellyfin` via `/permissions`.
+
 ## Style
 
 Keep replies to a line or two: what's playing now and anything notable ("Playing OK Computer by Radiohead, 12 tracks"). Never show item ids to the user. Music stops when this Claude session ends.

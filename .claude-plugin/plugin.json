@@ -5,5 +5,6 @@
   "author": {
     "name": "Anubhav Ujjawal"
   },
-  "keywords": ["jellyfin", "music", "mpv", "player"]
+  "keywords": ["jellyfin", "music", "mpv", "player"],
+  "types": "./types/index.d.ts"
 }

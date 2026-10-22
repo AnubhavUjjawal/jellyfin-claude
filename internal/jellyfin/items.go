@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -36,6 +37,7 @@ type Item struct {
 	ChildCount        int       `json:"ChildCount,omitempty"`
 	Genres            []string  `json:"Genres,omitempty"`
 	Container         string    `json:"Container,omitempty"`
+	HasLyrics         bool      `json:"HasLyrics,omitempty"`
 	UserData          *UserData `json:"UserData,omitempty"`
 }
 
@@ -60,7 +62,7 @@ type itemsResponse struct {
 	TotalRecordCount int    `json:"TotalRecordCount"`
 }
 
-const itemFields = "Genres,ChildCount"
+const itemFields = "Genres,ChildCount,HasLyrics"
 
 // Query runs GET path with the user and standard fields filled in.
 func (c *Client) Query(ctx context.Context, path string, q url.Values) ([]Item, int, error) {
@@ -154,6 +156,48 @@ func (c *Client) InstantMix(ctx context.Context, id string, limit int) ([]Item, 
 func (c *Client) Genres(ctx context.Context, limit int) ([]Item, error) {
 	items, _, err := c.Query(ctx, "/MusicGenres", url.Values{"limit": {strconv.Itoa(limit)}, "sortBy": {"SortName"}})
 	return items, err
+}
+
+// LyricLine is one line of a track's lyrics; Start is nil when the lyrics
+// aren't synced to the music.
+type LyricLine struct {
+	Text  string `json:"Text"`
+	Start *int64 `json:"Start,omitempty"`
+}
+
+// StartSec is the line's start in seconds, or -1 when unsynced.
+func (l LyricLine) StartSec() float64 {
+	if l.Start == nil {
+		return -1
+	}
+	return float64(*l.Start) / ticksPerSecond
+}
+
+// Lyrics fetches a track's lyrics (from .lrc files or a lyrics plugin on the
+// server, Jellyfin 10.9+). A track without lyrics is an APIError with status 404.
+func (c *Client) Lyrics(ctx context.Context, id string) ([]LyricLine, error) {
+	var res struct {
+		Lyrics []LyricLine `json:"Lyrics"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/Audio/"+url.PathEscape(id)+"/Lyrics", nil, nil, &res); err != nil {
+		return nil, err
+	}
+	return res.Lyrics, nil
+}
+
+// PrimaryImagePNG fetches an item's cover as a PNG no larger than size pixels
+// on its longer side. A missing image is an APIError with status 404.
+func (c *Client) PrimaryImagePNG(ctx context.Context, id string, size int) ([]byte, error) {
+	var buf bytes.Buffer
+	u := c.URL("/Items/"+url.PathEscape(id)+"/Images/Primary", url.Values{
+		"format":    {"Png"},
+		"maxWidth":  {strconv.Itoa(size)},
+		"maxHeight": {strconv.Itoa(size)},
+	})
+	if err := c.Download(ctx, u, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (c *Client) SetFavorite(ctx context.Context, id string, favorite bool) error {

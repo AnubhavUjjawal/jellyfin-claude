@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -99,8 +100,8 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 9 {
-		t.Errorf("got %d tools, want 9", len(tools.Tools))
+	if len(tools.Tools) != 12 {
+		t.Errorf("got %d tools, want 12", len(tools.Tools))
 	}
 
 	if out := call("status", nil); !strings.Contains(out, "Not connected") {
@@ -130,6 +131,19 @@ func TestIntegration(t *testing.T) {
 	}
 	playingID := regexp.MustCompile(`id (\w+)\)`).FindStringSubmatch(st)[1]
 	checkServerSeesPlayback(ctx, t, url, user, os.Getenv("JELLYFIN_TEST_PASS"), playingID)
+	np := nowPlaying(ctx, t, sess)
+	if np.State != "playing" || np.Track.ID != playingID || np.QueuePos != 1 || np.Track.AlbumID == "" || len(np.Upcoming) == 0 {
+		t.Errorf("now_playing = %+v", np)
+	}
+	art, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "artwork", Arguments: map[string]any{"item_id": np.Track.AlbumID, "size": 128}})
+	if err != nil || art.IsError || len(art.Content) != 1 {
+		t.Fatalf("artwork: %v %+v", err, art)
+	}
+	if img, ok := art.Content[0].(*mcp.ImageContent); !ok || img.MIMEType != "image/png" || !bytes.HasPrefix(img.Data, []byte("\x89PNG")) {
+		t.Errorf("artwork did not return a PNG: %T", art.Content[0])
+	}
+	checkLyrics(ctx, t, sess, np.Track)
+
 	call("control", map[string]any{"action": "pause"})
 	if !strings.Contains(call("status", nil), "Paused:") {
 		t.Errorf("expected Paused")
@@ -159,10 +173,57 @@ func TestIntegration(t *testing.T) {
 	call("favorite", nil)
 	call("favorite", map[string]any{"remove": true})
 	call("play", map[string]any{"limit": 3})
+	if out := call("play", map[string]any{"query": "coldplay"}); !strings.Contains(out, "Coldplay") {
+		t.Errorf("play by query didn't play Coldplay")
+	}
 	call("control", map[string]any{"action": "stop"})
+	if np := nowPlaying(ctx, t, sess); np.State != "stopped" || !np.Connected {
+		t.Errorf("after stop: now_playing = %+v", np)
+	}
 	call("status", nil)
 	call("logout", nil)
 	expectErr("search", map[string]any{"query": "a"})
+}
+
+func nowPlaying(ctx context.Context, t *testing.T, sess *mcp.ClientSession) nowPlayingOut {
+	t.Helper()
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "now_playing"})
+	if err != nil || res.IsError {
+		t.Fatalf("now_playing: %v %+v", err, res)
+	}
+	b, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var np nowPlayingOut
+	if err := json.Unmarshal(b, &np); err != nil {
+		t.Fatalf("now_playing structured content: %v", err)
+	}
+	return np
+}
+
+// checkLyrics checks the current track's lyrics agree with its has_lyrics flag:
+// lines in time order when synced, none when the track has none.
+func checkLyrics(ctx context.Context, t *testing.T, sess *mcp.ClientSession, track npTrack) {
+	t.Helper()
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "lyrics"})
+	if err != nil || res.IsError {
+		t.Fatalf("lyrics: %v %+v", err, res)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	var ly lyricsOut
+	if err := json.Unmarshal(b, &ly); err != nil {
+		t.Fatalf("lyrics structured content: %v", err)
+	}
+	t.Logf("lyrics for %q: %d lines, synced %v", track.Name, len(ly.Lines), ly.Synced)
+	if ly.TrackID != track.ID || track.HasLyrics != (len(ly.Lines) > 0) {
+		t.Errorf("lyrics = %d lines for track %s (has_lyrics %v)", len(ly.Lines), ly.TrackID, track.HasLyrics)
+	}
+	for i := 1; ly.Synced && i < len(ly.Lines); i++ {
+		if ly.Lines[i].Start < ly.Lines[i-1].Start {
+			t.Errorf("synced lyrics out of order at line %d", i)
+		}
+	}
 }
 
 // checkServerSeesPlayback logs in as a separate device and checks that Jellyfin
