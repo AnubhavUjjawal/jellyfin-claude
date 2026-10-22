@@ -1,0 +1,9 @@
+{
+  "name": "jellyfin",
+  "version": "0.1.0",
+  "description": "Play music from your Jellyfin server on this computer by talking to Claude: finds servers on your network, searches your library, and plays through mpv (or afplay on macOS) with no Jellyfin app open.",
+  "author": {
+    "name": "Anubhav Ujjawal"
+  },
+  "keywords": ["jellyfin", "music", "mpv", "player"]
+}

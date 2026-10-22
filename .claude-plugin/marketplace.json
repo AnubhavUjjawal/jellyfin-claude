@@ -1,0 +1,13 @@
+{
+  "name": "jellyfin-claude",
+  "owner": {
+    "name": "Anubhav Ujjawal"
+  },
+  "plugins": [
+    {
+      "name": "jellyfin",
+      "source": "./",
+      "description": "Play music from your Jellyfin server on this computer by talking to Claude."
+    }
+  ]
+}
