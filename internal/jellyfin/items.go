@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -154,6 +155,21 @@ func (c *Client) InstantMix(ctx context.Context, id string, limit int) ([]Item, 
 func (c *Client) Genres(ctx context.Context, limit int) ([]Item, error) {
 	items, _, err := c.Query(ctx, "/MusicGenres", url.Values{"limit": {strconv.Itoa(limit)}, "sortBy": {"SortName"}})
 	return items, err
+}
+
+// PrimaryImagePNG fetches an item's cover as a PNG no larger than size pixels
+// on its longer side. A missing image is an APIError with status 404.
+func (c *Client) PrimaryImagePNG(ctx context.Context, id string, size int) ([]byte, error) {
+	var buf bytes.Buffer
+	u := c.URL("/Items/"+url.PathEscape(id)+"/Images/Primary", url.Values{
+		"format":    {"Png"},
+		"maxWidth":  {strconv.Itoa(size)},
+		"maxHeight": {strconv.Itoa(size)},
+	})
+	if err := c.Download(ctx, u, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (c *Client) SetFavorite(ctx context.Context, id string, favorite bool) error {

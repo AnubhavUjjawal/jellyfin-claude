@@ -37,6 +37,16 @@ claude plugin install jellyfin@jellyfin-claude
 
 Restart Claude Code, then ask it to play something. The first start builds the server (a few seconds); run `make build` beforehand to skip that wait.
 
+#### One-time setup: let the player pane update
+
+The plugin adds a now-playing pane, a status line and `/jf` commands to Claude Code (see below). They talk to the plugin's own server in the background, and Claude Code never lets a plugin approve its own calls, so add one permission rule. Run `/permissions` and add an allow rule for:
+
+```
+mcp__plugin_jellyfin_jellyfin
+```
+
+or add it to `~/.claude/settings.json` under `permissions.allow`. Until then the pane shows this hint instead of prompting you every second.
+
 ### Claude Desktop
 
 ```sh
@@ -44,6 +54,38 @@ make desktop-config
 ```
 
 Merge the printed snippet into `~/Library/Application Support/Claude/claude_desktop_config.json` and restart Claude Desktop.
+
+## In Claude Code: pane, status line and /jf
+
+```
+╭────────────────────────────────────────────────────────────────────────────────✕─╮
+│ Yellow                                                                           │
+│ Coldplay - Parachutes                                                            │
+│ ━━────────────────────────────────────────────────────────────────── 0:09 / 4:29 │
+│ playing  vol 0  repeat off  1/1                                                  │
+│                                                                                  │
+│ [ prev ] [ pause ] [ next ] [ -10s ] [ +30s ] [ vol - ] [ vol + ] [ mix ]        │
+│ [ fav ] [ repeat off ]                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+  ⚠ jellyfin: > Yellow - Coldplay  0:09 / 4:29
+```
+
+- **The pane** opens by itself when music starts on a wide terminal (docked beside the chat), or with `/jf` at any width (above the prompt). Buttons work with the mouse, or with Tab and Enter once the pane has focus. Pressing an up-next row jumps to it.
+- **Album art** shows in terminals that draw pictures (kitty, Ghostty, WezTerm, iTerm2 3.5+, not inside tmux); elsewhere the text gets the room.
+- **The status line** under the prompt shows the current track; a toast announces each new one.
+- **`/jf` commands** act instantly, without a model turn:
+
+| Command | Does |
+| --- | --- |
+| `/jf` | show or hide the pane |
+| `/jf <name>` | play the best match for an artist, album, playlist or track |
+| `/jf pause` `resume` `next` `prev` `stop` | transport |
+| `/jf vol 40` / `vol +10` | volume |
+| `/jf seek 1:30` / `seek +30` | seek (mpv) |
+| `/jf mix` | more like the current track |
+| `/jf fav`, `shuffle`, `clear`, `repeat all` | the rest |
+
+Everything is laid out against the pane's measured width and only single-width characters are drawn, so the frame stays intact at any terminal size; long or wide (CJK, emoji) titles are cut with `…`.
 
 ## Tools
 
@@ -57,6 +99,8 @@ Merge the printed snippet into `~/Library/Application Support/Claude/claude_desk
 | `play` | Play/queue items (replace, next, append), shuffle, instant mix, genre radio, library shuffle |
 | `control` | Pause, resume, next, previous, stop, seek, volume, jump, shuffle, clear, repeat |
 | `favorite` | Favorite or unfavorite the current track or any item |
+| `now_playing` | Playback state as structured data (used by the pane) |
+| `artwork` | An item's cover as a PNG (used by the pane) |
 | `logout` | Log out and forget the saved login |
 
 ## Configuration (environment variables, all optional)
@@ -80,6 +124,8 @@ Merge the printed snippet into `~/Library/Application Support/Claude/claude_desk
 ```sh
 make build        # bin/jellyfin-mcp
 make test         # unit tests (backend tests use mpv/afplay when installed, at volume 0)
+claude plugin test .       # the pane/status/commands mod (hooks/), on every surface and width
+claude plugin validate .
 JELLYFIN_TEST_URL=nas.local JELLYFIN_TEST_USER=me JELLYFIN_TEST_PASS=... JELLYFIN_TEST_PLAYER=mpv make integration
 ```
 

@@ -16,6 +16,7 @@ type Track struct {
 	Name      string  `json:"name"`
 	Artist    string  `json:"artist,omitempty"`
 	Album     string  `json:"album,omitempty"`
+	AlbumID   string  `json:"album_id,omitempty"`
 	Container string  `json:"-"`
 	Duration  float64 `json:"duration_sec,omitempty"`
 }

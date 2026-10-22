@@ -16,44 +16,73 @@ import (
 	"jellyfin-claude/internal/player"
 )
 
+// Tool annotations let clients tell reads from actions: Claude Code's permission
+// modes treat a read-only tool's calls as reads, which the player pane's
+// once-a-second now_playing poll relies on.
+var (
+	closedWorld = new(bool)
+	readOnly    = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: closedWorld}
+	acts        = &mcp.ToolAnnotations{DestructiveHint: closedWorld, OpenWorldHint: closedWorld}
+)
+
 func (a *app) registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "discover_servers",
+		Annotations: readOnly,
 		Description: "Find Jellyfin servers on the local network via Jellyfin's UDP auto-discovery broadcast.",
 	}, a.discoverServers)
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "connect",
+		Name:        "connect",
+		Annotations: acts,
 		Description: "Log in to a Jellyfin server. Without username/password this starts Quick Connect and returns a code " +
 			"the user must approve in a signed-in Jellyfin app (profile menu > Quick Connect); login then completes in the " +
 			"background, so check with status. Prefer Quick Connect so the password never goes through the chat.",
 	}, a.connect)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "status",
+		Annotations: readOnly,
 		Description: "Show the Jellyfin connection and what's playing: current track and position, volume, repeat mode and the upcoming queue.",
 	}, a.status)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search",
+		Annotations: readOnly,
 		Description: "Search the music library by name. Returns tracks, albums, artists, playlists and genres with ids to pass to play.",
 	}, a.search)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "browse",
+		Annotations: readOnly,
 		Description: "List library music without a search term: favorites, recently_played, most_played, recently_added, random, albums, artists, playlists, genres, artist_albums (needs item_id) or tracks (the tracks of an album/artist/playlist/genre item_id).",
 	}, a.browse)
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "play",
+		Name:        "play",
+		Annotations: acts,
 		Description: "Play music on this computer's speakers. item_ids may be tracks, albums, artists, playlists or genres (expanded to their tracks). " +
-			"With instant_mix, plays music similar to the first item. With only genre, plays random tracks from that genre; with nothing, shuffles the whole library.",
+			"query plays the best library match for a name instead. With instant_mix, plays music similar to the first item. " +
+			"With only genre, plays random tracks from that genre; with nothing, shuffles the whole library.",
 	}, a.play)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "control",
+		Annotations: acts,
 		Description: "Control playback: pause, resume, toggle, next, previous, stop, seek, volume, jump, shuffle (the upcoming queue), clear (the upcoming queue) or repeat.",
 	}, a.control)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "favorite",
+		Annotations: acts,
 		Description: "Mark an item (default: the current track) as a favorite in Jellyfin, or remove it from favorites.",
 	}, a.favorite)
 	mcp.AddTool(s, &mcp.Tool{
+		Name:        "now_playing",
+		Annotations: readOnly,
+		Description: "Playback state as structured data (track, position, queue, volume). Used by the player pane; prefer status for answering the user.",
+	}, a.nowPlaying)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "artwork",
+		Annotations: readOnly,
+		Description: "Cover art of an item (usually the current track's album_id) as a PNG image. Used by the player pane.",
+	}, a.artwork)
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "logout",
+		Annotations: acts,
 		Description: "Stop playback, log out of the Jellyfin server and forget the saved login.",
 	}, a.logoutTool)
 }
@@ -369,6 +398,7 @@ func (a *app) browse(ctx context.Context, _ *mcp.CallToolRequest, in browseArgs)
 
 type playArgs struct {
 	ItemIDs    []string `json:"item_ids,omitempty" jsonschema:"ids from search or browse: tracks, albums, artists, playlists or genres, played in the order given"`
+	Query      string   `json:"query,omitempty" jsonschema:"instead of item_ids: play the best library match for this artist, album, playlist or track name (artists are shuffled)"`
 	Mode       string   `json:"mode,omitempty" jsonschema:"replace (default: play now, replacing the queue), next (play after the current track) or append (add to the end of the queue)"`
 	Shuffle    bool     `json:"shuffle,omitempty" jsonschema:"shuffle the tracks being added"`
 	InstantMix bool     `json:"instant_mix,omitempty" jsonschema:"play a mix of similar music seeded from the first item_id instead of the items themselves"`
@@ -384,6 +414,17 @@ func (a *app) play(ctx context.Context, _ *mcp.CallToolRequest, in playArgs) (*m
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 50
+	}
+
+	if in.Query != "" && len(in.ItemIDs) == 0 {
+		match, err := bestMatch(ctx, c, in.Query)
+		if err != nil {
+			return nil, nil, err
+		}
+		in.ItemIDs = []string{match.ID}
+		if match.Type == jellyfin.TypeArtist {
+			in.Shuffle = true
+		}
 	}
 
 	var items []jellyfin.Item
@@ -425,7 +466,7 @@ func (a *app) play(ctx context.Context, _ *mcp.CallToolRequest, in playArgs) (*m
 
 	tracks := make([]player.Track, len(items))
 	for i, it := range items {
-		tracks[i] = player.Track{ID: it.ID, Name: it.Name, Artist: it.Artist(), Album: it.Album, Container: it.Container, Duration: it.DurationSec()}
+		tracks[i] = player.Track{ID: it.ID, Name: it.Name, Artist: it.Artist(), Album: it.Album, AlbumID: it.AlbumID, Container: it.Container, Duration: it.DurationSec()}
 	}
 	if in.Shuffle {
 		rand.Shuffle(len(tracks), func(i, j int) { tracks[i], tracks[j] = tracks[j], tracks[i] })
@@ -546,6 +587,124 @@ func (a *app) favorite(ctx context.Context, _ *mcp.CallToolRequest, in favoriteA
 		return text("Removed %s from favorites.", name)
 	}
 	return text("Added %s to favorites.", name)
+}
+
+// bestMatch picks what a bare name most likely means: an exact name match wins
+// (artists, then albums, playlists, tracks), else the first artist, album,
+// playlist or track that the search returns.
+func bestMatch(ctx context.Context, c *jellyfin.Client, query string) (*jellyfin.Item, error) {
+	var first *jellyfin.Item
+	for _, typ := range []string{jellyfin.TypeArtist, jellyfin.TypeAlbum, jellyfin.TypePlaylist, jellyfin.TypeAudio} {
+		items, err := c.Search(ctx, query, typ, 5)
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			if strings.EqualFold(strings.TrimSpace(items[i].Name), strings.TrimSpace(query)) {
+				return &items[i], nil
+			}
+		}
+		if first == nil && len(items) > 0 {
+			first = &items[0]
+		}
+	}
+	if first == nil {
+		return nil, fmt.Errorf("nothing in the library matches %q", query)
+	}
+	return first, nil
+}
+
+// --- player pane ---
+
+type npTrack struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Artist   string  `json:"artist"`
+	Album    string  `json:"album"`
+	AlbumID  string  `json:"album_id"`
+	Duration float64 `json:"duration_sec"`
+}
+
+// nowPlayingOut is the pane's view of the world. Every field is always present
+// so the client never has to guess at absent keys.
+type nowPlayingOut struct {
+	Connected   bool      `json:"connected"`
+	Server      string    `json:"server"`
+	User        string    `json:"user"`
+	PendingCode string    `json:"pending_code"`
+	State       string    `json:"state" jsonschema:"playing, paused or stopped"`
+	Backend     string    `json:"backend"`
+	CanSeek     bool      `json:"can_seek"`
+	Track       npTrack   `json:"track" jsonschema:"the current track; id is empty when there is none"`
+	Position    float64   `json:"position_sec"`
+	QueuePos    int       `json:"queue_position" jsonschema:"1-based position of track in the queue, 0 when none"`
+	QueueLength int       `json:"queue_length"`
+	Upcoming    []npTrack `json:"upcoming"`
+	Volume      int       `json:"volume"`
+	Repeat      string    `json:"repeat"`
+	LastError   string    `json:"last_error"`
+}
+
+func toNP(t player.Track) npTrack {
+	return npTrack{ID: t.ID, Name: t.Name, Artist: t.Artist, Album: t.Album, AlbumID: t.AlbumID, Duration: t.Duration}
+}
+
+func (a *app) nowPlaying(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, nowPlayingOut, error) {
+	s := a.player.Status(5)
+	out := nowPlayingOut{
+		State:       string(s.State),
+		Backend:     s.Backend,
+		CanSeek:     s.Caps.Seek,
+		Position:    s.Position,
+		QueueLength: s.Total,
+		Upcoming:    []npTrack{},
+		Volume:      s.Volume,
+		Repeat:      s.Repeat,
+		LastError:   s.LastErr,
+	}
+	if s.Current != nil {
+		out.Track = toNP(*s.Current)
+		out.QueuePos = s.Index + 1
+	}
+	for _, t := range s.Upcoming {
+		out.Upcoming = append(out.Upcoming, toNP(t))
+	}
+	a.mu.Lock()
+	out.Connected = a.client != nil
+	if out.Connected {
+		out.Server, out.User = a.cfg.ServerName, a.cfg.UserName
+		if out.Server == "" {
+			out.Server = a.client.BaseURL
+		}
+	} else if a.pending != nil && a.pending.err == "" {
+		out.PendingCode = a.pending.code
+	}
+	a.mu.Unlock()
+	return nil, out, nil
+}
+
+type artworkArgs struct {
+	ItemID string `json:"item_id" jsonschema:"the item whose cover to fetch, usually an album id"`
+	Size   int    `json:"size,omitempty" jsonschema:"longest side in pixels (default 256, at most 1024)"`
+}
+
+func (a *app) artwork(ctx context.Context, _ *mcp.CallToolRequest, in artworkArgs) (*mcp.CallToolResult, any, error) {
+	c, err := a.conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	size := in.Size
+	if size <= 0 {
+		size = 256
+	}
+	png, err := c.PrimaryImagePNG(ctx, in.ItemID, min(size, 1024))
+	if jellyfin.IsStatus(err, 404) {
+		return text("No artwork for this item.")
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.ImageContent{Data: png, MIMEType: "image/png"}}}, nil, nil
 }
 
 // --- formatting ---

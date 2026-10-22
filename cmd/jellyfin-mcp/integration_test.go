@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -99,8 +100,8 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 9 {
-		t.Errorf("got %d tools, want 9", len(tools.Tools))
+	if len(tools.Tools) != 11 {
+		t.Errorf("got %d tools, want 11", len(tools.Tools))
 	}
 
 	if out := call("status", nil); !strings.Contains(out, "Not connected") {
@@ -130,6 +131,18 @@ func TestIntegration(t *testing.T) {
 	}
 	playingID := regexp.MustCompile(`id (\w+)\)`).FindStringSubmatch(st)[1]
 	checkServerSeesPlayback(ctx, t, url, user, os.Getenv("JELLYFIN_TEST_PASS"), playingID)
+	np := nowPlaying(ctx, t, sess)
+	if np.State != "playing" || np.Track.ID != playingID || np.QueuePos != 1 || np.Track.AlbumID == "" || len(np.Upcoming) == 0 {
+		t.Errorf("now_playing = %+v", np)
+	}
+	art, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "artwork", Arguments: map[string]any{"item_id": np.Track.AlbumID, "size": 128}})
+	if err != nil || art.IsError || len(art.Content) != 1 {
+		t.Fatalf("artwork: %v %+v", err, art)
+	}
+	if img, ok := art.Content[0].(*mcp.ImageContent); !ok || img.MIMEType != "image/png" || !bytes.HasPrefix(img.Data, []byte("\x89PNG")) {
+		t.Errorf("artwork did not return a PNG: %T", art.Content[0])
+	}
+
 	call("control", map[string]any{"action": "pause"})
 	if !strings.Contains(call("status", nil), "Paused:") {
 		t.Errorf("expected Paused")
@@ -159,10 +172,33 @@ func TestIntegration(t *testing.T) {
 	call("favorite", nil)
 	call("favorite", map[string]any{"remove": true})
 	call("play", map[string]any{"limit": 3})
+	if out := call("play", map[string]any{"query": "coldplay"}); !strings.Contains(out, "Coldplay") {
+		t.Errorf("play by query didn't play Coldplay")
+	}
 	call("control", map[string]any{"action": "stop"})
+	if np := nowPlaying(ctx, t, sess); np.State != "stopped" || !np.Connected {
+		t.Errorf("after stop: now_playing = %+v", np)
+	}
 	call("status", nil)
 	call("logout", nil)
 	expectErr("search", map[string]any{"query": "a"})
+}
+
+func nowPlaying(ctx context.Context, t *testing.T, sess *mcp.ClientSession) nowPlayingOut {
+	t.Helper()
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: "now_playing"})
+	if err != nil || res.IsError {
+		t.Fatalf("now_playing: %v %+v", err, res)
+	}
+	b, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var np nowPlayingOut
+	if err := json.Unmarshal(b, &np); err != nil {
+		t.Fatalf("now_playing structured content: %v", err)
+	}
+	return np
 }
 
 // checkServerSeesPlayback logs in as a separate device and checks that Jellyfin
