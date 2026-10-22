@@ -30,12 +30,27 @@ Claude ──MCP──▶ jellyfin-mcp ──HTTP──▶ Jellyfin server (sear
 
 ### Claude Code (plugin)
 
-```sh
-claude plugin marketplace add ~/Work/jellyfin-claude
-claude plugin install jellyfin@jellyfin-claude
+At the prompt of a Claude Code session:
+
+```
+/plugin install jellyfin --marketplace AnubhavUjjawal/jellyfin-claude
 ```
 
-Restart Claude Code, then ask it to play something. The first start builds the server (a few seconds); run `make build` beforehand to skip that wait.
+or from a shell:
+
+```sh
+claude plugin install jellyfin --marketplace AnubhavUjjawal/jellyfin-claude
+```
+
+Answer `y` to add the marketplace, pick a scope, then restart Claude Code and ask it to play something. The first start builds the server with Go (a few seconds).
+
+To hack on it, clone the repo and install from the folder instead; Claude Code then reads the plugin straight from your clone, and `/reload-plugins` picks up edits:
+
+```sh
+git clone https://github.com/AnubhavUjjawal/jellyfin-claude && cd jellyfin-claude
+claude plugin marketplace add "$PWD"
+claude plugin install jellyfin@jellyfin-claude
+```
 
 #### One-time setup: let the player pane update
 
@@ -48,6 +63,8 @@ mcp__plugin_jellyfin_jellyfin
 or add it to `~/.claude/settings.json` under `permissions.allow`. Until then the pane shows this hint instead of prompting you every second.
 
 ### Claude Desktop
+
+From a clone of this repo:
 
 ```sh
 make desktop-config
